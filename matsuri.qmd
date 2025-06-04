@@ -1,0 +1,626 @@
+---
+title: "no, but actually, should i keep texting them?"
+subtitle: "stanford cs 109 spring quarter final project entry"
+author: emily zou
+date: "2025-06-03"
+format:
+  html:
+    code-fold: true
+    toc: true
+    out-width: 100%
+    dpi: 300
+jupyter: python3
+---
+
+> ![Screenshot](cover2.jpg)
+> *literally me*
+
+
+```{python}
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from matplotlib.ticker import FuncFormatter
+from scipy.stats import wasserstein_distance
+from collections import Counter
+from datetime import date, timedelta
+from itertools import groupby
+```
+
+# ... the (very needed, and not exonerating) context 
+## .... data origins 
+I started talking to someone that I really like(d) on March 18, 2025 over Discord; between then and June 3, we've exchanged 15,965 messages. <br>
+However, in between then, I made a fatal mistake: I asked, "What are we?" <br>
+Since then, I began to suspect that the underlying distribution governing our interactions have fundamentally changed.  <br>
+Was i imagining things? I wanted to see if the disruption to the rhythm of our conversation was statistically present. <br>
+I did this originally to study for the midterm (I am the worst kind of student, and have only ever learned from doing things myself), but to also accept the end of a friendship that had become part of my daily routine. <br>
+
+> ![Screenshot](midterm_cap.png)
+> *Screenshot of the first version of this*
+
+
+
+After May 2nd, I did not stop talking to or seeing this person as of June 3 8:49PM. <br>
+
+BUT I’ve actually learned some probability since then! <br> Back then, my whole approach was just trying to estimate a PMF or CDF for the message-reply times and compare those directly. <br> Now that I know how bootstrapping works, I re-approached the question — “Are we still friends? Are we still the same?” — with four slightly more principled methods: <br>
+
+1. I used a lightweight bootstrapping method to compare when each of us sent the first message of the day, focusing on the median.  
+2. I treated each conversational turn as a Bernoulli trial — basically like a coin flip — and ran a first-order Markov model to find the most significant change point.  
+3. I used Wasserstein distance to track changes in the length of our conversation chunks over time.  
+4. I used full bootstrapping to test whether the time it took me to reply to them (and vice versa) changed meaningfully over the conversation.
+
+
+
+## .... data ethics
+
+1. They know about this — don’t worry.  
+2. All of the data is censored to just “Me” and “Them” and is available on the repo.  
+3. I pulled the messages using DiscordChatExporter (check it out here: https://github.com/Tyrrrz/DiscordChatExporter) by Oleksii Holub, which is also allowed generally because it is my own private messages.  
+4. I am not the kind of person that regularly does something like this. I just really, really don’t want to take the final.
+
+
+
+```{python}
+custom_palette = ["#7CBFAF", "#5B7E37"]
+
+sns.set_theme(style="whitegrid", palette=custom_palette)
+plt.rcParams['axes.facecolor'] = '#FCFAFD'
+plt.rcParams['figure.facecolor'] = '#FCFAFD'
+```
+
+```{python}
+def minutes_to_hhmm(x, _):
+    h = int(x) // 60
+    m = int(x) % 60
+    return f"{h:02}:{m:02}"
+```
+
+
+---
+
+# 1.... the "good morning" text 
+
+```{python}
+with open("not_me_first_message.txt") as f:
+    not_me_times = [line.strip() for line in f if line.strip()]
+
+with open("me_first_message.txt") as f:
+    me_times = [line.strip() for line in f if line.strip()]
+
+print (me_times[:5])
+```
+
+> *snippet of first message data (list)*
+
+
+## .... this data is 
+The time of the first message sent by the authors on each day. Because we've talked everyday, there are 76 points. 
+
+## .... what can we learn from this? 
+We want to know if we can find the day we /know/ something changed from the data -- this is one dimension. 
+
+## .... the gist of bootstrapping is
+Instead of assuming our data follows some neat theoretical distribution — like a normal curve — it builds a distribution directly from the data we actually have by repeatedly resampling our dataset to simulate what the range of possible outcomes might look like if you ran the experiment over and over. <br> In other words, it doesn’t guess what our data /should/ look like — it lets the data speak for itself.
+
+## .... this would help us in theory
+Because we want to know if the timing of our first messages actually shifted, or if any differences we see could just be randomness. <br> Bootstrapping helps us estimate how much variation we'd expect even if nothing really changed — so if the real change stands out from that baseline, we can say it’s probably meaningful.
+
+### .... but 76 points isn't really enough for us to infer anything 
+So instead, we set days as 'cutoffs' to compare distributions against, and we calculate the difference in medians. <br>
+We use medians here because it doesn't make sense to find the 'average' time that something happens by adding up time -- if i take medicine either at morning or at night, it doesn't mean that 'noon' is a meaningful reference point for us. 
+
+
+
+
+```{python}
+def first_contact_comparison(me_times, not_me_times):
+    me_df = pd.DataFrame({'datetime': pd.to_datetime(me_times)})
+    me_df['time_of_day_minutes'] = me_df['datetime'].dt.hour * 60 + me_df['datetime'].dt.minute
+    me_df = me_df.sort_values('datetime')
+    not_me_df = pd.DataFrame({'datetime': pd.to_datetime(not_me_times)})
+    not_me_df['time_of_day_minutes'] = not_me_df['datetime'].dt.hour * 60 + not_me_df['datetime'].dt.minute
+    not_me_df = not_me_df.sort_values('datetime')
+    plt.figure(figsize=(8, 5))
+    plt.plot(me_df['datetime'], me_df['time_of_day_minutes'], label="Me", linewidth=1.5)
+    plt.plot(not_me_df['datetime'], not_me_df['time_of_day_minutes'], label="Them", linewidth=1.5)
+    plt.gca().yaxis.set_major_formatter(FuncFormatter(minutes_to_hhmm))
+    plt.ylim(1440, 240)
+    plt.title("first message of the day")
+    plt.xlabel("date")
+    plt.ylabel("time of day")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+first_contact_comparison(me_times, not_me_times)
+```
+
+```{python}
+def find_shift_point(times):
+    df = pd.DataFrame({'datetime': pd.to_datetime(times)})
+    df['minutes'] = df['datetime'].dt.hour * 60 + df['datetime'].dt.minute
+    df = df.sort_values('datetime').reset_index(drop=True)
+    scores = []
+    for i in range(10, len(df)-10):  
+        before = df.loc[:i-1, 'minutes']
+        after = df.loc[i:, 'minutes']
+        diff = np.median(after) - np.median(before)
+        scores.append((df.loc[i, 'datetime'].date(), diff))
+    return pd.DataFrame(scores, columns=["date", "median_diff"])
+```
+
+```{python}
+
+me1 = find_shift_point(me_times)
+them1 = find_shift_point(not_me_times)
+
+def plot_shift_results(results_df):
+    results_df = results_df.sort_values("date")
+    x = pd.to_datetime(results_df["date"])
+    y = results_df["median_diff"]
+    plt.figure(figsize=(10, 5))
+    plt.plot(x, y, linewidth=2)
+    plt.axhline(0, linestyle='--', color='gray')
+    plt.title("median first message time at different date cutoffs")
+    plt.xlabel("Date")
+    plt.ylabel("median difference (in minutes)")
+    plt.tight_layout()
+    plt.show()
+
+def print_top_shifts(results_df, top_n=3):
+    top = results_df.reindex(results_df['median_diff'].abs().sort_values(ascending=False).index).head(top_n)
+    print(f"top {top_n} most significant change points (by absolute median shift):")
+    print(top)
+```
+
+## ... interpretation (me)
+A lower median difference — like the one I found — means I started replying earlier in the day. In other words, the median time of my replies shifted earlier in the later part of the conversation compared to before. 
+
+```{python}
+plot_shift_results(me1)
+```
+
+
+
+```{python}
+print_top_shifts(me1)
+```
+
+## ... interpretation (them)
+The day-by-day medians of their reply times show a clear upward trend, meaning that — statistically — they've started to respond later in the day. 
+
+```{python}
+plot_shift_results(them1)
+```
+
+
+```{python}
+print_top_shifts(them1)
+```
+
+
+---
+
+# 2.... life is like a box of coin flips
+
+```{python}
+coins = pd.read_csv("binomial_input.csv")
+coins.head(5)
+```
+
+## .... this data is 
+The turn-taking pattern of our conversation — who replied to whom, and when — looks a lot like a sequence of coin flips, just with timestamps attached.
+
+## .... what can we learn from this? 
+We’re looking for a shift in the rhythm of the exchange — a point where the pattern of back-and-forth noticeably changes. Can we pinpoint the moment the dynamic flipped?
+
+```{python}
+
+coins['date'] = pd.to_datetime(coins["date"], format="mixed").dt.tz_localize(None)
+runs = [x for x in coins['author']]
+```
+
+```{python}
+print (f"total messages: {len(coins)}") 
+```
+
+```{python}
+counts = Counter(runs)
+print(f"i sent {counts['Me']} messages, they sent {counts['Them']} messages")
+```
+
+## .... we have to assume that... 
+We assume that each turn in the conversation is generated as an independent and identically distributed (i.i.d.) random variable — for now, at least (we’ll get back to that). 
+
+To establish a baseline, we first estimate the overall probability of a message coming from either person ( the marginal probability that a given reply comes from me or from them). 
+
+```{python}
+print (f"my empirical p -- {counts['Me']/len(coins)}")
+print (f"their empirical p -- {counts['Them']/len(coins)}")
+```
+
+```{python}
+the_runs = [(key, sum(1 for _ in group)) for key, group in groupby(runs)]
+me_run_lengths = [length for author, length in the_runs if author == 'Me']
+them_run_lengths = [length for author, length in the_runs if author == 'Them']
+```
+
+```{python}
+def plot_run_length_comparison(me_run_lengths, them_run_lengths, p_me = 0.5125, p_them= 0.4874):
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
+    bar_colors = ['#7CBFAF', '#5B7E37']      
+    line_color = '#A94E46'                
+    for ax, run_lengths, p, label, bar_color in zip(
+        axes,
+        [me_run_lengths, them_run_lengths],
+        [p_me, p_them],
+        ['my', 'their'],
+        bar_colors):
+        counts = Counter(run_lengths)
+        observed_lengths = np.array(sorted(counts.keys()))
+        observed_freqs = np.array([counts[k] for k in observed_lengths])
+        expected_probs = [(1 - p) * p**(k - 1) for k in observed_lengths]
+        expected_counts = np.array(expected_probs) * sum(observed_freqs)
+        ax.bar(observed_lengths, observed_freqs, width=0.4, label='Observed', align='center', color=bar_color, alpha=0.8)
+        ax.plot(observed_lengths, expected_counts, 'o-', label='Expected (Geometric)', linewidth=2, color=line_color)
+        ax.set_title(f'{label} run lengths')
+        ax.set_xlabel('run length')
+        ax.set_ylabel('frequency')
+        ax.legend()
+    plt.tight_layout()
+    plt.show()
+```
+
+### ....shout out to pset3 problem 7 
+But what we want to know is a little different -- we're also looking at the results of coin flips, but we want to figure out if someone started making up the results halfway. 
+The run lengths — how many times in a row one person spoke — closely match what we’d expect from a geometric distribution. That means the conversation, overall, looks like a memoryless process: the chance of switching speakers stays about the same no matter how long someone has been talking. 
+Nothing weird is happening just from the structure alone — so if we do see a change later on, it’s probably real, not just a fluke of how the data is shaped.
+
+## .... conversations are not like coin flips 
+In a pure coin flip, each outcome is independent — the result of one flip tells you nothing about the next. 
+But conversations aren’t like that... whether I speak again or you do (to some extent) depends on who spoke last.
+So, we assume that these transitions follow a first-order Markov process — meaning that the next speaker depends only on who spoke last, not on anything before that.
+
+```{python}
+plot_run_length_comparison(me_run_lengths, them_run_lengths)
+```
+
+
+```{python}
+pairs = [
+    (the_runs[i][0], the_runs[i][1], the_runs[i+1][0], the_runs[i+1][1])
+    for i in range(len(the_runs)-1)
+    if the_runs[i][0] != the_runs[i+1][0]
+]
+
+local_ratios = []
+for a1, l1, a2, l2 in pairs:
+    if {a1, a2} == {'Me', 'Them'}:
+        me_len = l1 if a1 == 'Me' else l2
+        them_len = l1 if a1 == 'Them' else l2
+        local_ratios.append(me_len / (me_len + them_len))  # my share of this exchange
+
+run_indices = []
+i = 0
+for speaker, length in the_runs:
+    run_indices.append((speaker, length, i))  # i = start index of run in coins
+    i += length
+
+    
+local_dates = []
+for i in range(len(run_indices) - 1):
+    a1, _, idx1 = run_indices[i]
+    a2, _, idx2 = run_indices[i + 1]
+    if {a1, a2} == {'Me', 'Them'}:
+        start_idx = min(idx1, idx2)
+        local_dates.append(coins.iloc[start_idx]['date'])
+```
+
+## .... the mechanics 
+
+1. We make a transition matrix (like in 3.7!) --  the probabilities of switching from one speaker to the other -- since we're concerned with the 'first-order', there's only four possibilites we're interested in [(Me, Me), (Me, Them), (Them, Me), (Them, Them)]. 
+
+2. To find out when that structure changes, we try splitting the conversation at every possible point and fit a separate Markov model to the "before" and "after" segments. 
+
+3. For each split, we calculate a log-likelihood — a measure of how well each model explains its half of the data. 
+
+4. We compare those likelihoods to a single model that tries to explain everything, and look for where the biggest jump in explanatory power happens.
+
+That's probably when something changed.
+
+```{python}
+def get_transition_matrix(author_sequence):
+    transitions = list(zip(author_sequence[:-1], author_sequence[1:]))
+    counts = Counter(transitions)
+    total_from = Counter(a for a, _ in transitions)
+    matrix = {}
+    for (a1, a2), count in counts.items():
+        matrix[(a1, a2)] = count / total_from[a1]
+    return matrix
+
+def log_likelihood(segment, trans_probs):
+    ll = 0
+    for a1, a2 in zip(segment[:-1], segment[1:]):
+        prob = trans_probs.get((a1, a2), 1e-8)
+        ll += np.log(prob)
+    return ll
+
+def scan_for_change_point(sequence):
+    n = len(sequence)
+    global_model = get_transition_matrix(sequence)
+    global_ll = log_likelihood(sequence, global_model)
+    best_k = None
+    best_diff = -np.inf
+    diffs = []
+    for k in range(10, n - 10):
+        seq1 = sequence[:k]
+        seq2 = sequence[k:]
+        model1 = get_transition_matrix(seq1)
+        model2 = get_transition_matrix(seq2)
+        ll1 = log_likelihood(seq1, model1)
+        ll2 = log_likelihood(seq2, model2)
+        piecewise_ll = ll1 + ll2
+        diff = piecewise_ll - global_ll
+        diffs.append(diff)
+        if diff > best_diff:
+            best_diff = diff
+            best_k = k
+    return best_k, best_diff, diffs
+
+def plot_point_change(the_runs, coins, step=2000):
+    author_sequence = [a for a, l in the_runs for _ in range(l)]
+    best_idx, _, diffs = scan_for_change_point(author_sequence)
+
+    max_idx = min(len(diffs), len(coins))
+    label_indices = list(range(0, max_idx, step))
+    date_labels = [
+        pd.to_datetime(coins.iloc[i]['date']).strftime('%m-%d')
+        for i in label_indices
+    ]
+    plt.figure(figsize=(10, 4))
+    plt.plot(diffs)
+    plt.axvline(best_idx, color='red', linestyle='--', label='best change point')
+    plt.xticks(label_indices, date_labels, ha='right')
+    plt.xlabel("day")
+    plt.ylabel("log-likelihood improvement")
+    plt.title("first order markov change point detecting")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+```
+
+```{python}
+plot_point_change(the_runs, coins)
+```
+
+
+---
+
+# 3 .... double texting? red flag
+
+```{python}
+me = pd.read_csv("me_convo.csv")
+me.head(5)
+```
+
+## .... this data is 
+An extension of the above -- but it's focused on the length of each message run -- how much one says to another before they reply. 
+
+
+```{python}
+not_me = pd.read_csv("not_me_convo.csv")
+me["start_time"] = pd.to_datetime(me["start_time"], format="mixed").dt.tz_localize(None)
+not_me["start_time"] = pd.to_datetime(not_me["start_time"], format="mixed").dt.tz_localize(None)
+fig, axs = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+axs[0].plot(me["start_time"], me["length"], color='#7CBFAF')
+axs[0].set_ylabel("chunk length")
+axs[0].set_title("my message chunk lengths")
+axs[1].plot(not_me["start_time"], not_me["length"], color='#5B7E37')
+axs[1].set_ylabel("chunk length")
+axs[1].set_title("their message chunk lengths")
+plt.xlabel("day")
+plt.tight_layout()
+plt.show()
+```
+
+## .... how? 
+We learned about total variational distance, Wasserstein's distance, and KL divergence in class, which are methods that quantify how different two probability distributions are from each other. But Wasserstein's (or the name with much more aura, Earth Mover's) Distance doesn’t require us to know the underlying probability distributions— which is perfect, because we don’t. We’re just working with empirical distributions: the actual message chunk lengths from each day.
+
+Wasserstein distance measures how much “work” it would take to turn one distribution into another — like how much you’d have to move dirt around to reshape one pile into another. That makes it great for comparing two distributions even when they don’t overlap much or when one is just a shifted or stretched version of the other.
+
+In this case, we’re using it to compare the distributions of conversation chunk lengths over time, and whether the difference between days is small and consistent, or large and abrupt.
+
+```{python}
+def compute_daily_wasserstein(df):
+    df["day"] = df["start_time"].dt.date
+    df = df.sort_values("start_time").reset_index(drop=True)
+    global_dist = df["length"].dropna().values
+    results = []
+    for day, group in df.groupby("day"):
+        day_vals = group["length"].dropna().values
+        if len(day_vals) < 10:
+            continue
+        wdist = wasserstein_distance(day_vals, global_dist)
+        results.append({"day": day, "wdist": wdist})
+    result_df = pd.DataFrame(results)
+    result_df["day"] = pd.to_datetime(result_df["day"])
+    return result_df
+
+def plot_stacked_wasserstein(me_df, not_me_df):
+    me_res = compute_daily_wasserstein(me_df)
+    not_me_res = compute_daily_wasserstein(not_me_df)
+    fig, axs = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+    axs[0].plot(me_res["day"], me_res["wdist"], color='#7CBFAF', label="mine")
+    axs[0].set_title("earth mover's distance (mine)")
+    axs[0].set_ylabel("wasserstein distance")
+    axs[1].plot(not_me_res["day"], not_me_res["wdist"], color='#5B7E37', label="theirs")
+    axs[1].set_title("earth mover's distance (theirs)")
+    axs[1].set_ylabel("wasserstein distance")
+    axs[1].set_xlabel("day")
+    for ax in axs:
+        ax.tick_params(axis='x')
+    plt.tight_layout()
+    plt.show()
+
+def print_top_wasserstein_days(wdist_df, label):
+    top3 = wdist_df.sort_values("wdist", ascending=False).head(3)
+    print(f"Top 3 days with highest Wasserstein distance ({label}):")
+    for _, row in top3.iterrows():
+        print(f"{row['day'].date()} — {row['wdist']:.4f}")
+
+
+me_res = compute_daily_wasserstein(me)
+not_me_res = compute_daily_wasserstein(not_me)
+plot_stacked_wasserstein(me, not_me)
+print_top_wasserstein_days(me_res, "mine")
+print_top_wasserstein_days(not_me_res, "theirs")
+```
+
+---
+
+# 4 .... do not disturb 
+
+```{python}
+mez = pd.read_csv("me_reply_turns.csv")
+mez.head(5)
+```
+
+
+## .... this data is 
+The interval (in minutes) between each conversational turn / reply (switching from one person to another). 
+
+
+```{python}
+mez = pd.read_csv("me_reply_turns.csv")
+not_mez = pd.read_csv("not_me_reply_turns.csv")
+mez["start_time"] = pd.to_datetime(mez["time"], format="mixed").dt.tz_localize(None)
+not_mez["start_time"] = pd.to_datetime(not_me["start_time"], format="mixed").dt.tz_localize(None)
+```
+
+```{python}
+def plot_stacked_timeseries(me_df, not_me_df):
+    me_df = me_df.sort_values('start_time')
+    not_me_df = not_me_df.sort_values('start_time')
+    fig, axs = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+    axs[0].plot(me_df['start_time'], me_df['interval'], color='#7CBFAF', label='mine')
+    axs[0].set_ylabel('interval (minutes)')
+    axs[0].set_title('time to reply (mine)')
+    axs[1].plot(not_me_df['start_time'], not_me_df['interval'], color='#5B7E37', label='theirs')
+    axs[1].set_ylabel('interval (minutes)')
+    axs[1].set_xlabel('Date')
+    axs[1].set_title('time to reply (theirs)')
+    for ax in axs:
+        ax.tick_params(axis='x')
+    plt.tight_layout()
+    plt.show()
+
+plot_stacked_timeseries(mez, not_mez)
+```
+
+## .... full on bootstrapping 
+Earlier, we used a lightweight version of bootstrapping to scan for a potential shift in the timing of first messages; we’re doing the full thing now, since we've got around 6,000 conversational turns.
+
+By resampling from all the other days, we can build a kind of “null distribution” — a picture of what the mean response time would look like if this day were totally typical, then we compare the real value from the actual day to that distribution. 
+
+This gives us a way to identify specific days where the rhythm of conversation — like how fast (or slow) one of us replied — significantly changed. It’s useful because it doesn’t assume anything about how response times are distributed; it just asks.... 
+is this day weird compared to all the others?
+
+```{python}
+def bootstrap_test(df, stat='mean', n_boot=10000):
+    df['start_time'] = pd.to_datetime(df['start_time'])
+    df['date'] = df['start_time'].dt.date
+    results = []
+    start = date(2025, 3, 28)
+    end = date(2025, 5, 28)
+    all_dates = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+    for d in all_dates:
+        group = df[df['date'] == d]['interval']
+        rest = df[df['date'] != d]['interval']
+        if len(group) < 5:
+            continue
+        if stat == 'mean':
+            boot_stats = np.array([rest.sample(len(group), replace=True).mean() for _ in range(n_boot)])
+            observed = group.mean()
+        elif stat == 'median':
+            boot_stats = np.array([rest.sample(len(group), replace=True).median() for _ in range(n_boot)])
+            observed = group.median()
+        else:
+            raise ValueError("stat must be 'mean' or 'median'")
+        p_val = np.mean(np.abs(boot_stats - boot_stats.mean()) >= np.abs(observed - boot_stats.mean()))
+        ci_lower = np.percentile(boot_stats, 2.5)
+        ci_upper = np.percentile(boot_stats, 97.5)
+        direction = 'higher' if observed > boot_stats.mean() else 'lower'
+        results.append({
+            'date': d,
+            'p_value': p_val,
+            'n_obs': len(group),
+            'observed': observed,
+            'ci_lower': ci_lower,
+            'ci_upper': ci_upper, 
+            'direction': direction
+        })
+    return pd.DataFrame(results)
+```
+
+```{python}
+me4_mean = bootstrap_test(mez)
+se4_mean = bootstrap_test(not_mez)
+```
+
+```{python}
+def plot_stacked_bootstrap(me_df, not_me_df, title1="time to reply (me)", title2="time to reply (them)"):
+    fig, axs = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+    for ax, results_df, color, title in zip(
+        axs,
+        [me_df, not_me_df],
+        ['#7CBFAF', '#5B7E37'],
+        [title1, title2]
+    ):
+        results_df = results_df.sort_values("date")
+        x = pd.to_datetime(results_df["date"])
+        y = results_df["observed"]
+        lower = results_df["ci_lower"]
+        upper = results_df["ci_upper"]
+        ax.plot(x, y, label="Observed", color=color, linewidth=2)
+        ax.fill_between(x, lower, upper, color=color, alpha=0.2, label="95% CI")
+        ax.axhline(np.mean(y), color='gray', linestyle='--', linewidth=1, label="Overall mean")
+        ax.set_title(title)
+        ax.set_ylabel("time to reply (minutes)")
+        ax.tick_params(axis='x')
+    axs[1].set_xlabel("day")
+    axs[0].legend()
+    axs[1].legend()
+    plt.tight_layout()
+    plt.show()
+
+plot_stacked_bootstrap(me4_mean, se4_mean)
+```
+
+```{python}
+mytop3 = me4_mean.sort_values("p_value").head(3)
+print(mytop3)
+
+theirtop3 = se4_mean.sort_values("p_value").head(3)
+print(theirtop3)
+```
+
+# 5.... results 
+
+| Test         | Strongest Point of Change (Me) | Strongest Point of Change (Them) |
+|--------------|----------------|------------------|
+| 1: Median Split   | May 17 2025         | April 24, 2025           |
+| 2: First-order Markov   | May 20 2025     | May 20 2025            |
+| 3: Earth Mover's Distance   | April 24, 2025         | April 15, 2025         |
+| 4: Bootstrapping   | May 12, 2025         | April 29, 2025       |
+
+
+# 6 .... conclusion 
+#### The actual day of the 'treatment' was... April 24, 2025! 
+But yeah ... the results are kind of all over the place, and we can see (kinda) the effect of the day we know something happened. But the more salient finding (also  one does /not/ need probability to learn) is that human relationships are always changing. Things never go back to the way they were, and won't stay as they are now. 
+
+I think I'm going to stop trying to predict other people's behavior in the future; I'm literally 22 I don't know anything about how the world works. 
+There are many people I very much enjoy being with, a feeling that can never be expressed in theory, only experienced. 
+
+And I'm never going to stop texting that man. Matter of fact I've got to go reply right now. 
+
+---
